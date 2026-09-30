@@ -61,9 +61,7 @@ async def chat_with_agent(req: ChatRequest):
     ]
     is_briefing_kw = any(kw in msg_lower for kw in briefing_keywords)
 
-    # JIKA INSTRUKSI DELEGASI CEO
     if req.agent_id == "ceo-main" or is_briefing_kw:
-        # Simpan pesan instruksi atasan dari pengguna
         save_message("ceo-main", "You", req.message)
         if req.agent_id != "ceo-main":
             save_message(req.agent_id, "You", req.message)
@@ -76,7 +74,6 @@ async def chat_with_agent(req: ChatRequest):
         else:
             reply_text = result.get("master_report", "Gagal memproses briefing CEO.")
             
-            # GENERASI PERCAKAPAN LANGSUNG PAK PAKAR (CEO) <-> KARYAWAN
             if isinstance(result, dict) and "division_details" in result:
                 for div in result["division_details"]:
                     if isinstance(div, dict) and "team_contributions" in div:
@@ -88,19 +85,12 @@ async def chat_with_agent(req: ChatRequest):
                             
                             if target_id:
                                 involved_ids.append(target_id)
-                                
-                                # 1. Pesan instruksi dari Pak Pakar ke Karyawan
                                 ceo_msg = f"Halo {target_name}, tolong segera eksekusi tugas berikut:\n{task_text}"
                                 save_message(target_id, "Pak Pakar (CEO)", ceo_msg)
-                                
-                                # 2. Pesan balasan laporan dari Karyawan ke Pak Pakar
                                 emp_reply = f"Siap Pak Pakar! Berikut laporan hasil pengerjaannya:\n\n{res_text}"
                                 save_message(target_id, target_name, emp_reply)
-                                
-                                # 3. Catatan ringkas di thread CEO
                                 save_message("ceo-main", "Pak Pakar (CEO)", f"💬 [Instruksi Ke {target_name}]: {task_text}")
 
-        # Simpan Laporan Konsolidasi Master CEO
         save_message("ceo-main", "Pak Pakar (CEO)", reply_text)
         if req.agent_id != "ceo-main":
             save_message(req.agent_id, "Pak Pakar (CEO)", reply_text)
@@ -112,7 +102,6 @@ async def chat_with_agent(req: ChatRequest):
             "involved_ids": list(set(involved_ids))
         }
 
-    # CHAT 1-ON-1 BIASA
     save_message(req.agent_id, "You", req.message)
     result = await run_agent_chat(req.agent_id, req.message)
     reply_text = result.get("response", "Tidak ada respon.")
@@ -142,7 +131,7 @@ async def ceo_briefing_endpoint(req: CEOBriefingRequest):
     result = await run_ceo_briefing(req.brief)
     
     master_report = result.get("master_report", "Gagal memproses briefing CEO.")
-    save_message(ceo_id, "Pak Pakar (CEO) (Master Executive Strategy)", master_report)
+    save_message(ceo_id, "Pak Pakar (CEO)", master_report)
     
     return result
 

@@ -9,14 +9,12 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
-# Menggunakan model Gemini 3.5 Flash Lite
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
 def parse_content_to_str(content: Any) -> str:
-    """Helper untuk mengonversi respon content LLM menjadi string murni."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -41,11 +39,26 @@ async def call_llm_safe(messages: list, max_retries: int = 4) -> Any:
                 error_str = str(e)
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "RateLimit" in error_str:
                     wait_time = 2 * (attempt + 1)
-                    print(f"[Rate Limit] Kuota tercapai, menunggu {wait_time} detik... (Attempt {attempt + 1}/{max_retries})")
+                    print(f"[Rate Limit] Menunggu {wait_time} detik... (Attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait_time)
                 else:
                     raise e
         return await llm.ainvoke(messages)
+
+def get_agent_history(agent_id: str, limit: int = 6) -> str:
+    """Mengambil riwayat percakapan & instruksi CEO sebelumnya dari database."""
+    try:
+        res = supabase.table("messages").select("sender, text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
+        if res.data:
+            chronological_msgs = list(reversed(res.data))
+            history_text = "\n\n--- RIWAYAT PERCAKAPAN & INSTRUKSI TERAKHIR ---\n"
+            for m in chronological_msgs:
+                history_text += f"{m['sender']}: {m['text']}\n"
+            history_text += "--- AKHIR RIWAYAT ---\nGunakan informasi riwayat di atas untuk memberikan respons yang relevan dan konsisten.\n"
+            return history_text
+    except Exception as e:
+        print(f"Error fetching history: {e}")
+    return ""
 
 async def run_agent_chat(agent_id: str, user_message: str):
     agent_data = get_agent_from_db(agent_id)
@@ -55,8 +68,12 @@ async def run_agent_chat(agent_id: str, user_message: str):
     system_prompt = agent_data["system_prompt"]
     agent_name = agent_data["name"]
 
+    # Memuat Memori Konteks
+    context_memory = get_agent_history(agent_id, limit=6)
+    full_system_prompt = system_prompt + context_memory
+
     messages = [
-        SystemMessage(content=system_prompt),
+        SystemMessage(content=full_system_prompt),
         HumanMessage(content=user_message)
     ]
 
