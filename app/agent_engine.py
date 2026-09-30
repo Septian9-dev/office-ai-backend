@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import re
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -9,41 +10,26 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
-# Konfigurasi LLM menggunakan model gemini-3.5-flash-lite dan temperature 0.85
+# Menggunakan model gemini-3.5-flash-lite
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
     temperature=0.85,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# PROMPT FEW-SHOT & PANDUAN KATA TERLARANG
-FEW_SHOT_HUMAN_PROMPT = """
-DILARANG KERAS MENGGUNAKAN KATA-KATA ROBOTIK BERIKUT:
-❌ "Tentu,"
-❌ "Sebagai [peran]..."
-❌ "Poin tersebut telah saya pahami..."
-❌ "Berikut adalah..."
-❌ "Demikian laporan..."
-❌ "Saya siap membantu Anda..."
+# PROMPT INTERNAL REASONING & MEMORY
+REASONING_AND_HUMAN_PROMPT = """
+DILARANG KERAS MENGGUNAKAN BAHASA ROBOTIK (misal: "Tentu", "Sebagai AI", "Poin tersebut telah saya pahami", "Berikut adalah").
 
-GAYA BICARA KANTOR MODERN (MANUSIAWI & NATURAL):
-- Bicara langsung seperti kirim chat di Slack/WhatsApp kantor.
-- Pakai variasi kata: "Okee", "Sip", "Gini mas/mbak", "Aman", "Gass", "Btw", "Siap Pak".
-- Boleh pakai singkatan wajar (yg, dkk, bgt, tetep).
+REASONING LOOP (ANALISIS INTERNAL SEBELUM MENJAWAB):
+Sebelum memberikan balasan akhir, lakukan analisis internal singkat di dalam tag <thinking>...</thinking>:
+<thinking>
+1. Apa inti dari pesan pengguna dan apa konteks dari Long-Term Memory yang relevan?
+2. Bagaimana karakter/personaku menyikapi hal ini secara alami & tidak kaku?
+3. Apa tindakan atau jawaban paling tepat dan manusiawi?
+</thinking>
 
-CONTOH DIALOG MANUSIAWI (JADIKAN PATOKAN GAYA BICARA):
-
-[Contoh Chat Pak Pakar - CEO]
-User: "Pak Pakar, kita mau buat campaign baru untuk akhir tahun."
-Pak Pakar: "Sip, mantap! Ide bagus tuh. Eko coba siapin konsep utamanya dulu ya, Raka minta tolong visual 3D-nya disiapin dari sekarang. Pokoknya akhir minggu ini gue mau liat draf awalnya ya team."
-
-[Contoh Chat Rina - Content Lead]
-Pak Pakar: "Rina, tolong buat skrip video iklan ya."
-Rina: "Okee Pak Pakar! Ini draf kasar skripnya udah gue susun. Konsepnya dibuat rada pop & eye-catching di 5 detik pertama biar orang ga skip. Coba cek deh Pak:"
-
-[Contoh Chat Raka - 3D Artist]
-Pak Pakar: "Raka, animasi 3D produk gimana?"
-Raka: "Aman Pak! Aset 3D-nya udah beres di-render. Lighting sama shading-nya udah gue bikin modern banget biar makin dapet feel premium-nya. Tinggal gabungin sama tim video."
+TULIS BALASAN AKHIR DILUAR TAG <thinking>. Balasan harus santai, komunikatif, dan fleksibel seperti obrolan tim kantor di Slack/WhatsApp.
 """
 
 def parse_content_to_str(content: Any) -> str:
@@ -58,6 +44,11 @@ def parse_content_to_str(content: Any) -> str:
                 extracted_parts.append(item["text"])
         return "\n".join(extracted_parts)
     return str(content)
+
+def clean_thinking_process(text: str) -> str:
+    """Menghapus blok <thinking>...</thinking> agar tidak muncul di UI pengguna."""
+    cleaned = re.sub(r'<thinking>.*?</thinking>', '', text, flags=re.DOTALL)
+    return cleaned.strip()
 
 semaphore = asyncio.Semaphore(3)
 
@@ -74,19 +65,63 @@ async def call_llm_safe(messages: list, max_retries: int = 3) -> Any:
                     raise e
         return await llm.ainvoke(messages)
 
+# --- LONG-TERM MEMORY FUNCTIONS ---
+
+def get_agent_long_term_memories(agent_id: str, limit: int = 10) -> str:
+    """Mengambil fakta/ingatan jangka panjang yang pernah dicatat oleh agen."""
+    try:
+        res = supabase.table("agent_memories").select("memory_text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
+        if res.data and len(res.data) > 0:
+            mem_text = "\n--- INGATAN JANGKA PANJANG (LONG-TERM MEMORY) ---\n"
+            for m in res.data:
+                mem_text += f"• {m['memory_text']}\n"
+            mem_text += "--------------------------------------------------\n"
+            return mem_text
+    except Exception as e:
+        print(f"Error fetching long term memories: {e}")
+    return ""
+
+async def extract_and_save_memory_background(agent_id: str, user_message: str, agent_response: str):
+    """Mengekstrak informasi penting dari percakapan dan menyimpannya ke memori jangka panjang."""
+    extraction_prompt = f"""
+    Analisis percakapan berikut:
+    User: "{user_message}"
+    Agent: "{agent_response}"
+
+    Apakah ada fakta penting, preferensi user, keputusan proyek, atau instruksi khusus yang perlu DIINGAT DALAM JANGKA PANJANG?
+    Jika ADA, tuliskan 1-2 kalimat ringkas faktanya saja.
+    Jika TIDAK ADA (hanya obrolan biasa/sapaan umum), balas HANYA dengan kata "NIHIL".
+    """
+    try:
+        res = await call_llm_safe([
+            SystemMessage(content="Kamu adalah pemproses memori AI."),
+            HumanMessage(content=extraction_prompt)
+        ])
+        extracted = parse_content_to_str(res.content).strip()
+        if extracted and "NIHIL" not in extracted.upper():
+            supabase.table("agent_memories").insert({
+                "agent_id": agent_id,
+                "memory_text": extracted
+            }).execute()
+            print(f"[Memory Saved for {agent_id}]: {extracted}")
+    except Exception as e:
+        print(f"Error saving memory: {e}")
+
 def get_agent_history(agent_id: str, limit: int = 6) -> str:
     try:
         res = supabase.table("messages").select("sender, text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
         if res.data:
             chronological_msgs = list(reversed(res.data))
-            history_text = "\n\n--- RIWAYAT CHAT ---\n"
+            history_text = "\n--- RIWAYAT CHAT TERAKHIR ---\n"
             for m in chronological_msgs:
                 history_text += f"{m['sender']}: {m['text']}\n"
-            history_text += "--- AKHIR RIWAYAT ---\n"
+            history_text += "-----------------------------\n"
             return history_text
     except Exception as e:
         print(f"Error fetching history: {e}")
     return ""
+
+# --- MAIN AGENT CHAT EXECUTION ---
 
 async def run_agent_chat(agent_id: str, user_message: str):
     agent_data = get_agent_from_db(agent_id)
@@ -95,33 +130,45 @@ async def run_agent_chat(agent_id: str, user_message: str):
     
     system_prompt = agent_data["system_prompt"]
     agent_name = agent_data["name"]
+    
+    # 1. Ambil Memori Jangka Panjang & Riwayat Obrolan
+    long_term_memories = get_agent_long_term_memories(agent_id, limit=8)
     context_memory = get_agent_history(agent_id, limit=6)
 
-    full_system_prompt = f"{system_prompt}\n\n{FEW_SHOT_HUMAN_PROMPT}\n{context_memory}"
+    full_system_prompt = f"{system_prompt}\n\n{REASONING_AND_HUMAN_PROMPT}\n{long_term_memories}\n{context_memory}"
 
     messages = [
         SystemMessage(content=full_system_prompt),
         HumanMessage(content=user_message)
     ]
 
-    response = await call_llm_safe(messages)
+    # 2. Panggil LLM (Reasoning Loop)
+    raw_response = await call_llm_safe(messages)
+    full_text = parse_content_to_str(raw_response.content)
+    
+    # 3. Bersihkan pemikiran internal (<thinking>) untuk balasan pengguna
+    final_response = clean_thinking_process(full_text)
+
+    # 4. Jalankan ekstraksi memori jangka panjang secara async di background
+    asyncio.create_task(extract_and_save_memory_background(agent_id, user_message, final_response))
+
     return {
         "agent_id": agent_id,
         "agent_name": agent_name,
-        "response": parse_content_to_str(response.content)
+        "response": final_response
     }
 
 async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
     prompt = f"""
-    Kamu adalah Pak Pakar (CEO kantor). User kasih briefing:
+    Kamu adalah Pak Pakar (CEO kantor). User memberikan briefing:
     "{user_macro_brief}"
 
     Tugasmu:
-    1. Jawab seperti CEO nyata di chat kantor (singkat, tegas, komunikatif, tanpa bahasa baku formal/robotik).
-    2. Pilih 2-3 ID agen relevan dari: 'mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead'.
-    3. Kasih arahan santai ke agen tersebut.
+    1. Lakukan analisis internal dulu di <thinking>...</thinking>.
+    2. Jawab seperti CEO nyata (komunikatif, luwes, lugas).
+    3. Pilih 2-3 ID agen relevan ('mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
 
-    BALAS HANYA FORMAT JSON VALID INI:
+    BALAS HANYA FORMAT JSON VALID INI (JANGAN MASUKKAN TAG THINKING KE DALAM JSON):
     {{
       "master_report": "Chat balasan Pak Pakar yang santai dan tegas ke user...",
       "delegations": [
@@ -136,21 +183,23 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
 
     try:
         response = await call_llm_safe([
-            SystemMessage(content=f"Kamu adalah Pak Pakar, CEO startup yang santai dan luwes.\n{FEW_SHOT_HUMAN_PROMPT}"),
+            SystemMessage(content=f"Kamu adalah Pak Pakar, CEO startup yang santai dan berwibawa.\n{REASONING_AND_HUMAN_PROMPT}"),
             HumanMessage(content=prompt)
         ])
         raw_text = parse_content_to_str(response.content)
         clean_json = raw_text.replace("```json", "").replace("```", "").strip()
         data = json.loads(clean_json)
 
+        master_report = clean_thinking_process(data.get("master_report", "Sip, instruksi udah diterusin ke tim ya!"))
+
         return {
-            "master_report": data.get("master_report", "Sip, instruksi udah gue terusin ke tim ya!"),
+            "master_report": master_report,
             "delegations": data.get("delegations", [])
         }
     except Exception as e:
         print(f"Error in CEO initial response: {e}")
         return {
-            "master_report": f"Sip, ide '{user_macro_brief}' udah dikoordinasin. Tim langsung jalan ya!",
+            "master_report": f"Sip, instruksi '{user_macro_brief}' udah gue terima. Tim terkait langsung jalan ya!",
             "delegations": [
                 {"agent_id": "content-writer", "agent_name": "Rina (Content Lead)", "task": "Bikin draf skrip iklan."},
                 {"agent_id": "design-3d", "agent_name": "Raka (3D Artist)", "task": "Siapin visual 3D-nya."}
@@ -161,12 +210,16 @@ async def process_agent_task_background(agent_id: str, agent_name: str, task_des
     agent_data = get_agent_from_db(agent_id)
     system_prompt = agent_data.get("system_prompt", f"Kamu adalah {agent_name}.") if agent_data else f"Kamu adalah {agent_name}."
 
+    long_term_memories = get_agent_long_term_memories(agent_id, limit=5)
+
     background_prompt = f"""
-    Proyek: "{macro_brief}"
+    Proyek Utama: "{macro_brief}"
     Arahan Pak Pakar: "{task_description}"
 
+    {long_term_memories}
+
     Tugasmu:
-    Kerjakan tugas ini dengan lengkap dan profesional, TAPI sampaikan seperti kamu lagi laporan di chat WhatsApp/Slack tim. Gaya bahasa santai, lugas, dan ga kaku sama sekali.
+    Kerjakan tugas ini secara mendalam, lalu sampaikan balasan seperti kamu lagi kirim laporan singkat di chat Slack kantor.
     """
 
     try:
@@ -177,17 +230,21 @@ async def process_agent_task_background(agent_id: str, agent_name: str, task_des
         }).execute()
 
         response = await call_llm_safe([
-            SystemMessage(content=f"{system_prompt}\n\n{FEW_SHOT_HUMAN_PROMPT}"),
+            SystemMessage(content=f"{system_prompt}\n\n{REASONING_AND_HUMAN_PROMPT}"),
             HumanMessage(content=background_prompt)
         ])
 
-        result_text = parse_content_to_str(response.content)
+        raw_text = parse_content_to_str(response.content)
+        result_text = clean_thinking_process(raw_text)
 
         supabase.table("messages").insert({
             "agent_id": agent_id,
             "sender": agent_name,
             "text": result_text
         }).execute()
+
+        # Ekstrak fakta penting dari tugas ini ke Long-Term Memory
+        asyncio.create_task(extract_and_save_memory_background(agent_id, task_description, result_text))
 
     except Exception as e:
         print(f"Error in background task: {e}")
