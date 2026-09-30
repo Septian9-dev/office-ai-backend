@@ -10,7 +10,7 @@ from app.database import supabase, get_agent_from_db
 load_dotenv()
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="gemini-3.5-flash-lite",
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
