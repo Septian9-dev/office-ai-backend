@@ -10,26 +10,26 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
-# Menggunakan model gemini-3.5-flash-lite
+# Konfigurasi model Gemini 3.5 Flash Lite
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
     temperature=0.85,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# PROMPT INTERNAL REASONING & MEMORY
+# ATURAN GLOBAL REASONING & FORMAT BEBAS ROBOTIK
 REASONING_AND_HUMAN_PROMPT = """
 DILARANG KERAS MENGGUNAKAN BAHASA ROBOTIK (misal: "Tentu", "Sebagai AI", "Poin tersebut telah saya pahami", "Berikut adalah").
 
 REASONING LOOP (ANALISIS INTERNAL SEBELUM MENJAWAB):
 Sebelum memberikan balasan akhir, lakukan analisis internal singkat di dalam tag <thinking>...</thinking>:
 <thinking>
-1. Apa inti dari pesan pengguna dan apa konteks dari Long-Term Memory yang relevan?
-2. Bagaimana karakter/personaku menyikapi hal ini secara alami & tidak kaku?
-3. Apa tindakan atau jawaban paling tepat dan manusiawi?
+1. Apa inti dari pesan pengguna dan apa konteks dari Long-Term Memory/riwayat obrolan yang relevan?
+2. Bagaimana persona, gaya bicara, dan ciri khas spesifikku menyikapi hal ini secara alami & tidak kaku?
+3. Apa tindakan atau jawaban paling tepat, relevan, dan manusiawi?
 </thinking>
 
-TULIS BALASAN AKHIR DILUAR TAG <thinking>. Balasan harus santai, komunikatif, dan fleksibel seperti obrolan tim kantor di Slack/WhatsApp.
+TULIS BALASAN AKHIR DILUAR TAG <thinking>. Balasan harus luwes, komunikatif, dan fleksibel sesuai persona agen.
 """
 
 def parse_content_to_str(content: Any) -> str:
@@ -135,21 +135,29 @@ async def run_agent_chat(agent_id: str, user_message: str):
     long_term_memories = get_agent_long_term_memories(agent_id, limit=8)
     context_memory = get_agent_history(agent_id, limit=6)
 
-    full_system_prompt = f"{system_prompt}\n\n{REASONING_AND_HUMAN_PROMPT}\n{long_term_memories}\n{context_memory}"
+    # 2. Susun prompt gabungan yang memprioritaskan Persona SQL
+    full_system_prompt = f"""=== PERSONA SPESIFIK & GAYA BICARA AGEN (DARI DATABASE) ===
+{system_prompt}
+
+=== ATURAN REASONING & FORMAT BAHASA ===
+{REASONING_AND_HUMAN_PROMPT}
+
+{long_term_memories}
+{context_memory}"""
 
     messages = [
         SystemMessage(content=full_system_prompt),
         HumanMessage(content=user_message)
     ]
 
-    # 2. Panggil LLM (Reasoning Loop)
+    # 3. Panggil LLM (Reasoning Loop)
     raw_response = await call_llm_safe(messages)
     full_text = parse_content_to_str(raw_response.content)
     
-    # 3. Bersihkan pemikiran internal (<thinking>) untuk balasan pengguna
+    # 4. Bersihkan pemikiran internal (<thinking>) untuk balasan pengguna
     final_response = clean_thinking_process(full_text)
 
-    # 4. Jalankan ekstraksi memori jangka panjang secara async di background
+    # 5. Jalankan ekstraksi memori jangka panjang secara async di background
     asyncio.create_task(extract_and_save_memory_background(agent_id, user_message, final_response))
 
     return {
@@ -159,13 +167,16 @@ async def run_agent_chat(agent_id: str, user_message: str):
     }
 
 async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
+    ceo_data = get_agent_from_db("ceo-main")
+    ceo_prompt = ceo_data["system_prompt"] if ceo_data else "Kamu adalah Pak Pakar (CEO)."
+
     prompt = f"""
-    Kamu adalah Pak Pakar (CEO kantor). User memberikan briefing:
+    Pengguna memberikan briefing makro:
     "{user_macro_brief}"
 
     Tugasmu:
     1. Lakukan analisis internal dulu di <thinking>...</thinking>.
-    2. Jawab seperti CEO nyata (komunikatif, luwes, lugas).
+    2. Jawab seperti Pak Pakar (CEO) sesuai persona dan gaya bicaramu.
     3. Pilih 2-3 ID agen relevan ('mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
 
     BALAS HANYA FORMAT JSON VALID INI (JANGAN MASUKKAN TAG THINKING KE DALAM JSON):
@@ -175,7 +186,7 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
         {{
           "agent_id": "id_agen_1",
           "agent_name": "Nama Agen 1",
-          "task": "Instruksi santai dari Pak Pakar ke Agen 1"
+          "task": "Instruksi dari Pak Pakar ke Agen 1"
         }}
       ]
     }}
@@ -183,7 +194,7 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
 
     try:
         response = await call_llm_safe([
-            SystemMessage(content=f"Kamu adalah Pak Pakar, CEO startup yang santai dan berwibawa.\n{REASONING_AND_HUMAN_PROMPT}"),
+            SystemMessage(content=f"{ceo_prompt}\n\n{REASONING_AND_HUMAN_PROMPT}"),
             HumanMessage(content=prompt)
         ])
         raw_text = parse_content_to_str(response.content)
@@ -219,7 +230,7 @@ async def process_agent_task_background(agent_id: str, agent_name: str, task_des
     {long_term_memories}
 
     Tugasmu:
-    Kerjakan tugas ini secara mendalam, lalu sampaikan balasan seperti kamu lagi kirim laporan singkat di chat Slack kantor.
+    Kerjakan tugas ini secara mendalam sesuai peranmu, lalu sampaikan balasan seperti kamu lagi kirim laporan di chat Slack kantor sesuai persona dan gaya bicaramu.
     """
 
     try:
