@@ -9,19 +9,41 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
+# High Temperature (0.85) agar bahasa bervariasi dan tidak kaku
 llm = ChatGoogleGenerativeAI(
-    model="gemini-3.5-flash-lite",
+    model="gemini-1.5-flash",
+    temperature=0.85,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# Instruksi global agar gaya percakapan seluruh AI Agent terasa alami & komunikatif
-HUMAN_TONE_INSTRUCTION = """
-PANDUAN GAYA BAHASA MANUSIAWI & FLEKSIBEL (HUMAN-LIKE CONVERSATION):
-1. Bicara secara natural, komunikatif, dan luwes seperti rekan kerja di kantor/startup modern Indonesia.
-2. HINDARI bahasa kaku atau robotic (jangan gunakan kalimat seperti "Poin tersebut telah saya pahami...", "Tentu, sebagai AI...", atau bahasa surat dinas yang terlalu kaku).
-3. Gunakan sapaan dan artikulasi yang ramah serta bervariasi (misalnya: "Halo Pak/Bu", "Sip, siap!", "Okee Pak Pakar", "Gini mas/mbak...", "Bisa banget!", dll).
-4. Gunakan variasi intonasi, emosi positif, dan emoji secukupnya agar percakapan terasa hidup dan tidak membosankan.
-5. Tetap profesional dan fokus memberikan solusi terbaik sesuai keahlian & persona utama.
+# PROMPT KHUSUS: FEW-SHOT EXAMPLES + BANNED WORDS
+FEW_SHOT_HUMAN_PROMPT = """
+DILARANG KERAS MENGGUNAKAN KATA-KATA ROBOTIK BERIKUT:
+❌ "Tentu,"
+❌ "Sebagai [peran]..."
+❌ "Poin tersebut telah saya pahami..."
+❌ "Berikut adalah..."
+❌ "Demikian laporan..."
+❌ "Saya siap membantu Anda..."
+
+GAYA BICARA KANTOR MODERN (MANUSIAWI & NATURAL):
+- Bicara langsung seperti kirim chat di Slack/WhatsApp kantor.
+- Pakai variasi kata: "Okee", "Sip", "Gini mas/mbak", "Aman", "Gass", "Btw", "Siap Pak".
+- Boleh pakai singkatan wajar (yg, dkk, bgt, tetep).
+
+CONTOH DIALOG MANUSIAWI (JADIKAN PATOKAN GAYA BICARA):
+
+[Contoh Chat Pak Pakar - CEO]
+User: "Pak Pakar, kita mau buat campaign baru untuk akhir tahun."
+Pak Pakar: "Sip, mantap! Ide bagus tuh. Eko coba siapin konsep utamanya dulu ya, Raka minta tolong visual 3D-nya disiapin dari sekarang. Pokoknya akhir minggu ini gue mau liat draf awalnya ya team."
+
+[Contoh Chat Rina - Content Lead]
+Pak Pakar: "Rina, tolong buat skrip video iklan ya."
+Rina: "Okee Pak Pakar! Ini draf kasar skripnya udah gue susun. Konsepnya dibuat rada pop & eye-catching di 5 detik pertama biar orang ga skip. Coba cek deh Pak:"
+
+[Contoh Chat Raka - 3D Artist]
+Pak Pakar: "Raka, animasi 3D produk gimana?"
+Raka: "Aman Pak! Aset 3D-nya udah beres di-render. Lighting sama shading-nya udah gue bikin modern banget biar makin dapet feel premium-nya. Tinggal gabungin sama tim video."
 """
 
 def parse_content_to_str(content: Any) -> str:
@@ -57,7 +79,7 @@ def get_agent_history(agent_id: str, limit: int = 6) -> str:
         res = supabase.table("messages").select("sender, text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
         if res.data:
             chronological_msgs = list(reversed(res.data))
-            history_text = "\n\n--- RIWAYAT PERCAKAPAN TERAKHIR ---\n"
+            history_text = "\n\n--- RIWAYAT CHAT ---\n"
             for m in chronological_msgs:
                 history_text += f"{m['sender']}: {m['text']}\n"
             history_text += "--- AKHIR RIWAYAT ---\n"
@@ -75,8 +97,7 @@ async def run_agent_chat(agent_id: str, user_message: str):
     agent_name = agent_data["name"]
     context_memory = get_agent_history(agent_id, limit=6)
 
-    # Menggabungkan instruksi persona, gaya bahasa manusiawi, dan memori percakapan
-    full_system_prompt = f"{system_prompt}\n\n{HUMAN_TONE_INSTRUCTION}\n{context_memory}"
+    full_system_prompt = f"{system_prompt}\n\n{FEW_SHOT_HUMAN_PROMPT}\n{context_memory}"
 
     messages = [
         SystemMessage(content=full_system_prompt),
@@ -91,33 +112,23 @@ async def run_agent_chat(agent_id: str, user_message: str):
     }
 
 async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
-    """
-    TAHAP 1: Respon cepat CEO Pak Pakar (2-3 detik) untuk menghindari timeout.
-    """
-    res = supabase.table("agents").select("id, name, division, role, system_prompt").execute()
-
     prompt = f"""
-    Kamu adalah Pak Pakar (CEO). Pengguna memberikan instruksi/briefing makro:
+    Kamu adalah Pak Pakar (CEO kantor). User kasih briefing:
     "{user_macro_brief}"
 
     Tugasmu:
-    1. Buat Laporan Strategi Eksekutif (Master Executive Report) yang tegas, lugas, namun tetap komunikatif.
-    2. Tentukan 2-3 agen spesialis/manajer yang paling tepat untuk mengeksekusi tugas ini (pilih ID dari: 'mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
-    3. Tentukan instruksi penugasan spesifik untuk masing-masing agen tersebut.
+    1. Jawab seperti CEO nyata di chat kantor (singkat, tegas, komunikatif, tanpa bahasa baku formal/robotik).
+    2. Pilih 2-3 ID agen relevan dari: 'mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead'.
+    3. Kasih arahan santai ke agen tersebut.
 
-    BALAS HANYA DALAM FORMAT JSON VALID BERIKUT (TANPA MARKDOWN BLOCK/TEKS LAIN):
+    BALAS HANYA FORMAT JSON VALID INI:
     {{
-      "master_report": "Laporan Strategi Eksekutif Pak Pakar (CEO)...",
+      "master_report": "Chat balasan Pak Pakar yang santai dan tegas ke user...",
       "delegations": [
         {{
           "agent_id": "id_agen_1",
           "agent_name": "Nama Agen 1",
-          "task": "Detail instruksi penugasan spesifik untuk Agen 1"
-        }},
-        {{
-          "agent_id": "id_agen_2",
-          "agent_name": "Nama Agen 2",
-          "task": "Detail instruksi penugasan spesifik untuk Agen 2"
+          "task": "Instruksi santai dari Pak Pakar ke Agen 1"
         }}
       ]
     }}
@@ -125,7 +136,7 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
 
     try:
         response = await call_llm_safe([
-            SystemMessage(content=f"Kamu adalah AI CEO kantor yang responsif, berwibawa, dan komunikatif.\n\n{HUMAN_TONE_INSTRUCTION}"),
+            SystemMessage(content=f"Kamu adalah Pak Pakar, CEO startup yang santai dan luwes.\n{FEW_SHOT_HUMAN_PROMPT}"),
             HumanMessage(content=prompt)
         ])
         raw_text = parse_content_to_str(response.content)
@@ -133,53 +144,45 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
         data = json.loads(clean_json)
 
         return {
-            "master_report": data.get("master_report", "Sip, instruksi briefing sudah diteruskan ke tim terkait ya!"),
+            "master_report": data.get("master_report", "Sip, instruksi udah gue terusin ke tim ya!"),
             "delegations": data.get("delegations", [])
         }
     except Exception as e:
         print(f"Error in CEO initial response: {e}")
         return {
-            "master_report": f"Oke, instruksi '{user_macro_brief}' sudah dikoordinasikan ke tim. Anggota divisi terkait sedang menyiapkan laporan detailnya ya.",
+            "master_report": f"Sip, ide '{user_macro_brief}' udah dikoordinasin. Tim langsung jalan ya!",
             "delegations": [
-                {"agent_id": "content-writer", "agent_name": "Rina (Content Lead)", "task": "Menyusun draf naskah storyboard video iklan."},
-                {"agent_id": "design-3d", "agent_name": "Raka (3D Artist)", "task": "Membuat pemodelan & animasi 3D produk."}
+                {"agent_id": "content-writer", "agent_name": "Rina (Content Lead)", "task": "Bikin draf skrip iklan."},
+                {"agent_id": "design-3d", "agent_name": "Raka (3D Artist)", "task": "Siapin visual 3D-nya."}
             ]
         }
 
 async def process_agent_task_background(agent_id: str, agent_name: str, task_description: str, macro_brief: str):
-    """
-    TAHAP 2: Diproses Asynchronous di Background Task.
-    Menghasilkan output pengerjaan yang detail namun disampaikan dengan gaya rekan kerja alami.
-    """
     agent_data = get_agent_from_db(agent_id)
     system_prompt = agent_data.get("system_prompt", f"Kamu adalah {agent_name}.") if agent_data else f"Kamu adalah {agent_name}."
 
     background_prompt = f"""
-    Konteks Proyek Utama Perusahaan: "{macro_brief}"
-    Instruksi Khusus dari Pak Pakar (CEO): "{task_description}"
+    Proyek: "{macro_brief}"
+    Arahan Pak Pakar: "{task_description}"
 
     Tugasmu:
-    Kerjakan tugas ini secara MENDALAM, DETAIL, DAN PROFESIONAL sesuai peranmu.
-    Sampaikan hasil pengerjaanmu dengan gaya bahasa rekan kerja yang alami, ramah, dan komunikatif. Berikan draf konkret/output teknis yang siap langsung dipakai oleh tim.
+    Kerjakan tugas ini dengan lengkap dan profesional, TAPI sampaikan seperti kamu lagi laporan di chat WhatsApp/Slack tim. Gaya bahasa santai, lugas, dan ga kaku sama sekali.
     """
 
     try:
-        # 1. Simpan pesan instruksi CEO ke database
         supabase.table("messages").insert({
             "agent_id": agent_id,
             "sender": "Pak Pakar (CEO)",
-            "text": f"Halo {agent_name}, tolong bantu eksekusi tugas ini ya:\n{task_description}"
+            "text": f"Halo {agent_name}, tolong bantu eksekusi ini ya:\n{task_description}"
         }).execute()
 
-        # 2. Panggil AI untuk pengerjaan mendalam dengan persona manusiawi
         response = await call_llm_safe([
-            SystemMessage(content=f"{system_prompt}\n\n{HUMAN_TONE_INSTRUCTION}"),
+            SystemMessage(content=f"{system_prompt}\n\n{FEW_SHOT_HUMAN_PROMPT}"),
             HumanMessage(content=background_prompt)
         ])
 
         result_text = parse_content_to_str(response.content)
 
-        # 3. Simpan laporan balasan detail karyawan ke database
         supabase.table("messages").insert({
             "agent_id": agent_id,
             "sender": agent_name,
@@ -187,9 +190,4 @@ async def process_agent_task_background(agent_id: str, agent_name: str, task_des
         }).execute()
 
     except Exception as e:
-        print(f"Error in background task for agent {agent_id}: {e}")
-        supabase.table("messages").insert({
-            "agent_id": agent_id,
-            "sender": agent_name,
-            "text": f"Halo Pak Pakar, laporan hasil kerja untuk tugas '{task_description}' sudah rampung diselesaikan dan siap dikoordinasikan lebih lanjut!"
-        }).execute()
+        print(f"Error in background task: {e}")
