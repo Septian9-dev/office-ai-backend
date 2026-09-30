@@ -25,7 +25,6 @@ class BriefingRequest(BaseModel):
 class CEOBriefingRequest(BaseModel):
     brief: str
 
-# Helper untuk menyimpan pesan ke tabel messages di Supabase
 def save_message(agent_id: str, sender: str, text: str):
     try:
         supabase.table("messages").insert({
@@ -45,7 +44,6 @@ def get_all_agents():
     response = supabase.table("agents").select("id, name, division, role, position_x, position_y, position_z, status").execute()
     return {"agents": response.data}
 
-# Endpoint untuk mengambil riwayat chat agen dari Supabase
 @app.get("/messages/{agent_id}")
 def get_messages(agent_id: str):
     response = supabase.table("messages").select("*").eq("agent_id", agent_id).order("created_at", desc=False).execute()
@@ -56,16 +54,16 @@ async def chat_with_agent(req: ChatRequest):
     save_message(req.agent_id, "You", req.message)
     msg_lower = req.message.lower()
 
-    # Kata kunci penanda instruksi briefing / pembuatan proyek
+    # Kata kunci penanda instruksi briefing / pembaruan proyek / delegasi tugas
     briefing_keywords = [
         "briefing", "semua divisi", "lintas divisi", "kumpulkan manajer", 
         "kumpulkan manager", "rapat divisi", "koordinasi divisi", 
-        "instruksikan semua", "perintah ke semua", "arahkan semua",
-        "proyek baru", "projek baru", "buat projek", "buat proyek"
+        "instruksikan semua", "perintah ke semua", "arahkan", "minta",
+        "siapkan konsep", "estimasi", "perbarui", "modern", "proyek baru", "projek baru"
     ]
     is_briefing_kw = any(kw in msg_lower for kw in briefing_keywords)
 
-    # ALUR CEO BRIEFING: Jika pesan ditujukan ke CEO atau berisi instruksi briefing
+    # JIKA DIKIRIM KE CEO ATAU MEMILIKI KATA KUNCI DELEGASI
     if req.agent_id == "ceo-main" or is_briefing_kw:
         result = await run_ceo_briefing(req.message)
         
@@ -81,7 +79,7 @@ async def chat_with_agent(req: ChatRequest):
             "response": reply_text
         }
 
-    # ALUR CHAT BIASA: Jika obrolan 1-on-1 dengan manajer/spesialis tertentu
+    # CHAT ORDINARY (1-ON-1)
     result = await run_agent_chat(req.agent_id, req.message)
     reply_text = result.get("response", "Tidak ada respon.")
     save_message(req.agent_id, result.get("agent_name", "Agent"), reply_text)

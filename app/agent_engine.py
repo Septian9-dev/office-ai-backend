@@ -16,7 +16,7 @@ llm = ChatGoogleGenerativeAI(
 )
 
 def parse_content_to_str(content: Any) -> str:
-    """Helper untuk mengonversi respon content LLM (baik string maupun list) menjadi string murni."""
+    """Helper untuk mengonversi respon content LLM menjadi string murni."""
     if isinstance(content, str):
         return content
     if isinstance(content, list):
@@ -29,20 +29,18 @@ def parse_content_to_str(content: Any) -> str:
         return "\n".join(extracted_parts)
     return str(content)
 
-# Semaphore & Retry Manager untuk mencegah error 429 (Rate Limit 15 RPM Free Tier)
-semaphore = asyncio.Semaphore(2)  # Maksimal 2 request diproses bersamaan
+semaphore = asyncio.Semaphore(3)
 
 async def call_llm_safe(messages: list, max_retries: int = 4) -> Any:
     async with semaphore:
         for attempt in range(max_retries):
             try:
-                # Jeda 0.8 detik antar request agar tidak melebihi batas 15 RPM
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.15)
                 return await llm.ainvoke(messages)
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "RateLimit" in error_str:
-                    wait_time = 4 * (attempt + 1)
+                    wait_time = 2 * (attempt + 1)
                     print(f"[Rate Limit] Kuota tercapai, menunggu {wait_time} detik... (Attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait_time)
                 else:
@@ -72,7 +70,6 @@ async def run_agent_chat(agent_id: str, user_message: str):
     }
 
 async def run_team_briefing(division: str, user_brief: str) -> Dict:
-    # 1. Ambil seluruh agen di divisi dari Supabase
     res = supabase.table("agents").select("*").eq("division", division).execute()
     agents = res.data
     if not agents:
@@ -84,7 +81,6 @@ async def run_team_briefing(division: str, user_brief: str) -> Dict:
     if not manager:
         return {"error": "Manager divisi tidak ditemukan."}
 
-    # 2. Manager Menganalisis Brief & Membagi Tugas ke Maksimal 2 Spesialis
     specialist_info = "\n".join([f"- ID: {s['id']}, Nama: {s['name']}, Persona: {s['system_prompt']}" for s in specialists])
     
     planning_prompt = f"""
@@ -117,7 +113,6 @@ async def run_team_briefing(division: str, user_brief: str) -> Dict:
     except Exception:
         tasks = [{"agent_id": specialists[0]["id"], "task": user_brief}]
 
-    # 3. Masing-Masing Spesialis Mengerjakan Sub-Tugasnya
     async def execute_task(task_item):
         agent_data = next((s for s in specialists if s["id"] == task_item["agent_id"]), None)
         if not agent_data:
@@ -139,7 +134,6 @@ async def run_team_briefing(division: str, user_brief: str) -> Dict:
     specialist_results = await asyncio.gather(*[execute_task(t) for t in tasks])
     valid_results = [r for r in specialist_results if r is not None]
 
-    # 4. Manager Merangkum Seluruh Hasil Kerja Tim
     results_summary_str = ""
     for r in valid_results:
         results_summary_str += f"\n--- Laporan dari {r['agent_name']} ---\nTugas: {r['task']}\nHasil:\n{r['result']}\n"
@@ -170,7 +164,6 @@ async def run_team_briefing(division: str, user_brief: str) -> Dict:
     }
 
 async def run_ceo_briefing(user_macro_brief: str) -> Dict:
-    # 1. Ambil seluruh Manager Divisi dari database
     res = supabase.table("agents").select("*").eq("role", "Manager").execute()
     managers = res.data
     
@@ -179,7 +172,6 @@ async def run_ceo_briefing(user_macro_brief: str) -> Dict:
 
     manager_info = "\n".join([f"- Divisi: {m['division']}, Manager: {m['name']}" for m in managers])
 
-    # 2. CEO memilih MAKSIMAL 2 divisi paling relevan (agar hemat kuota API)
     ceo_plan_prompt = f"""
     Kamu adalah CEO Perusahaan.
     Brief Makro Perusahaan dari Owner/User: "{user_macro_brief}"
@@ -212,17 +204,14 @@ async def run_ceo_briefing(user_macro_brief: str) -> Dict:
     except Exception:
         division_tasks = [{"division": managers[0]["division"], "brief": user_macro_brief}]
 
-    # Pembatasan keras maksimal 2 divisi untuk Free Tier API
     division_tasks = division_tasks[:2]
 
-    # 3. Jalankan Briefing Divisi secara Teratur (Sequential Throttle)
     division_reports = []
     for t in division_tasks:
         if isinstance(t, dict) and "division" in t and "brief" in t:
             report = await run_team_briefing(t["division"], t["brief"])
             division_reports.append(report)
 
-    # 4. CEO Merangkum Master Strategy Report
     combined_reports_str = ""
     for r in division_reports:
         if isinstance(r, dict) and "executive_summary" in r:
