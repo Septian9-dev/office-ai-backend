@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from app.agent_engine import run_agent_chat, run_team_briefing, run_ceo_briefing
@@ -54,8 +54,35 @@ def get_messages(agent_id: str):
 @app.post("/chat/agent")
 async def chat_with_agent(req: ChatRequest):
     save_message(req.agent_id, "You", req.message)
+    msg_lower = req.message.lower()
+
+    # Kata kunci penanda instruksi briefing / pembuatan proyek
+    briefing_keywords = [
+        "briefing", "semua divisi", "lintas divisi", "kumpulkan manajer", 
+        "kumpulkan manager", "rapat divisi", "koordinasi divisi", 
+        "instruksikan semua", "perintah ke semua", "arahkan semua",
+        "proyek baru", "projek baru", "buat projek", "buat proyek"
+    ]
+    is_briefing_kw = any(kw in msg_lower for kw in briefing_keywords)
+
+    # ALUR CEO BRIEFING: Jika pesan ditujukan ke CEO atau berisi instruksi briefing
+    if req.agent_id == "ceo-main" or is_briefing_kw:
+        result = await run_ceo_briefing(req.message)
+        
+        if isinstance(result, dict) and "error" in result:
+            reply_text = f"Maaf, terjadi kesalahan saat menyusun briefing: {result['error']}"
+        else:
+            reply_text = result.get("master_report", "Gagal memproses briefing CEO.")
+        
+        save_message("ceo-main", "Pak Pakar (CEO)", reply_text)
+        return {
+            "agent_id": "ceo-main",
+            "agent_name": "Pak Pakar (CEO)",
+            "response": reply_text
+        }
+
+    # ALUR CHAT BIASA: Jika obrolan 1-on-1 dengan manajer/spesialis tertentu
     result = await run_agent_chat(req.agent_id, req.message)
-    
     reply_text = result.get("response", "Tidak ada respon.")
     save_message(req.agent_id, result.get("agent_name", "Agent"), reply_text)
     
@@ -63,7 +90,6 @@ async def chat_with_agent(req: ChatRequest):
 
 @app.post("/chat/briefing")
 async def team_briefing_endpoint(req: BriefingRequest):
-    # Ambil ID Manager dari divisi
     res = supabase.table("agents").select("id, name").eq("division", req.division).eq("role", "Manager").execute()
     manager = res.data[0] if res.data else None
     manager_id = manager["id"] if manager else "unknown"
