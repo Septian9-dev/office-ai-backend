@@ -1,7 +1,6 @@
 import os
 import json
 import asyncio
-import re
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,10 +9,10 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
-# Konfigurasi model Gemini 3.5 Flash Lite
+# Konfigurasi Gemini 3.5 Flash Lite
 llm = ChatGoogleGenerativeAI(
     model="gemini-3.5-flash-lite",
-    temperature=0.9,  # Temperature dinaikkan sedikit agar respons lebih bervariasi
+    temperature=0.9,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
@@ -51,26 +50,26 @@ def get_agent_long_term_memories(agent_id: str, limit: int = 5) -> str:
     try:
         res = supabase.table("agent_memories").select("memory_text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
         if res.data and len(res.data) > 0:
-            mem_text = "\n[Catatan & Memori Penting Kamu]:\n"
+            mem_text = "\n[Catatan Memori Jangka Panjang]:\n"
             for m in res.data:
                 mem_text += f"- {m['memory_text']}\n"
             return mem_text
     except Exception as e:
-        print(f"Error fetching long term memories: {e}")
+        print(f"Error fetching memories: {e}")
     return ""
 
 async def extract_and_save_memory_background(agent_id: str, user_message: str, agent_response: str):
     extraction_prompt = f"""
-    Percakapan:
+    Analisis obrolan:
     User: "{user_message}"
     Agent: "{agent_response}"
 
-    Apakah ada fakta penting, keputusan proyek, atau informasi personal baru tentang lawan bicara yang harus diingat jangka panjang?
-    Jika ADA, tulis ringkas 1 kalimat. Jika TIDAK ADA, balas "NIHIL".
+    Apakah ada fakta penting, preferensi personal, atau keputusan proyek baru yang perlu diingat?
+    Jika ADA, tulis ringkas 1 kalimat faktanya. Jika TIDAK ADA, balas HANYA "NIHIL".
     """
     try:
         res = await call_llm_safe([
-            SystemMessage(content="Kamu pencatat memori."),
+            SystemMessage(content="Kamu pencatat memori ringkas."),
             HumanMessage(content=extraction_prompt)
         ])
         extracted = parse_content_to_str(res.content).strip()
@@ -87,7 +86,7 @@ def get_agent_history(agent_id: str, limit: int = 6) -> str:
         res = supabase.table("messages").select("sender, text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
         if res.data:
             chronological_msgs = list(reversed(res.data))
-            history_text = "\n[Obrolan Sebelumnya]:\n"
+            history_text = "\n[Riwayat Chat Terakhir]:\n"
             for m in chronological_msgs:
                 history_text += f"{m['sender']}: {m['text']}\n"
             return history_text
@@ -110,27 +109,33 @@ async def run_agent_chat(agent_id: str, user_message: str):
     long_term_memories = get_agent_long_term_memories(agent_id, limit=5)
     context_memory = get_agent_history(agent_id, limit=6)
 
-    # Prompt Organik tanpa pagar larangan yang berlebihan
-    organic_system_prompt = f"""Kamu adalah {agent_name}, seorang manusia nyata yang menjabat sebagai {agent_role} di divisi {agent_division}.
+    organic_prompt = f"""Kamu adalah {agent_name}, seorang pekerja nyata di kantor ini yang menjabat sebagai {agent_role} di divisi {agent_division}.
 
-[Karakter & Gaya Bicaramu]:
+Identitas & Persona Khususmu:
 {system_prompt_db}
 
-[Cara Kamu Berpikir & Merespons]:
-- Berpikirlah secara independen sebagai {agent_name}. Jawab pesan lawan bicara secara spontan, luwes, dan alami layaknya rekan kerja nyata di obrolan kantor/Slack.
-- Jika lawan bicara hanya menyapa, bertanya hal umum, atau mengobrol santai, tanggapi langsung sebagai dirimu sendiri tanpa perlu bersikap kaku atau menganggapnya sebagai perintah kerja.
-- Jika lawan bicara memberikan tugas proyek, berikan arahan atau solusi sesuai keahlianmu.
-- Jangan pernah menyebut dirimu sebagai AI, robot, atau asisten virtual.
+Panduan Merespons:
+1. Berpikirlah secara mandiri dan natural sesuai kepribadianmu di atas.
+2. Jawab pesan lawan bicara secara langsung, santai, dan spontan layaknya obrolan nyata antar rekan kerja di Slack/WhatsApp kantor.
+3. Jika lawan bicara hanya menyapa, bertanya hal umum, atau mengobrol biasa, tanggapi langsung sesuai sudut pandang pekerjaan dan kesibukanmu hari ini.
+4. Jangan pernah mengaku sebagai AI, bot, program, atau asisten virtual.
 {long_term_memories}
 {context_memory}"""
 
     messages = [
-        SystemMessage(content=organic_system_prompt),
+        SystemMessage(content=organic_prompt),
         HumanMessage(content=user_message)
     ]
 
     raw_response = await call_llm_safe(messages)
     final_response = parse_content_to_str(raw_response.content).strip()
+
+    # Simpan riwayat chat & ekstraksi memori
+    try:
+        supabase.table("messages").insert({"agent_id": agent_id, "sender": "You", "text": user_message}).execute()
+        supabase.table("messages").insert({"agent_id": agent_id, "sender": agent_name, "text": final_response}).execute()
+    except Exception as e:
+        print(f"Error logging messages: {e}")
 
     asyncio.create_task(extract_and_save_memory_background(agent_id, user_message, final_response))
 
@@ -144,28 +149,28 @@ async def run_ceo_initial_response(user_macro_brief: str) -> Dict:
     ceo_data = get_agent_from_db("ceo-main")
     ceo_prompt = ceo_data["system_prompt"] if ceo_data else "Kamu adalah Pak Pakar (CEO)."
 
-    prompt = f"""User mengirim pesan: "{user_macro_brief}"
+    prompt = f"""Pesan dari user: "{user_macro_brief}"
 
-Sikap Kamu (Pak Pakar - CEO):
-1. Pikirkan dulu: Apakah pesan ini cuma sapaan/obrolan biasa, ATAU briefing proyek nyata yang butuh tim bekerja?
-2. Kalau cuma obrolan/pertanyaan biasa: Jawab langsung dengan gaya santai kamu, lalu beri array kosong [] untuk "delegations".
-3. Kalau briefing proyek nyata: Jawab sebagai CEO, lalu delegasikan ke 2-3 agen relevan ('mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
+Instruksi untuk Pak Pakar (CEO):
+1. Evaluasi pesan di atas: Apakah ini sapaan/obrolan santai, ATAU instruksi proyek bisnis yang nyata?
+2. Jika OBROLAN / SAPAAN SANTAI: Jawab langsung pesan tersebut secara akrab dan santai, lalu kosongkan array "delegations" `[]`.
+3. Jika INSTRUKSI PROYEK NYATA: Berikan arahan eksekutif, lalu delegasikan ke 2-3 ID agen relevan ('mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
 
-Kirim balasan HANYA dalam format JSON ini:
+Kirim balasan HANYA dalam JSON valid:
 {{
-  "master_report": "Balasan kamu sebagai Pak Pakar...",
+  "master_report": "Balasan akrab Pak Pakar...",
   "delegations": [
     {{
-      "agent_id": "id_agen_1",
-      "agent_name": "Nama Agen 1",
-      "task": "Detail tugas singkat"
+      "agent_id": "id_agen",
+      "agent_name": "Nama Agen",
+      "task": "Detail tugas"
     }}
   ]
 }}"""
 
     try:
         response = await call_llm_safe([
-            SystemMessage(content=f"{ceo_prompt}\nJawablah sebagai manusia nyata (Pak Pakar CEO)."),
+            SystemMessage(content=f"{ceo_prompt}\nBerpikirlah dan jawablah sebagai manusia nyata (Pak Pakar CEO)."),
             HumanMessage(content=prompt)
         ])
         raw_text = parse_content_to_str(response.content)
@@ -173,7 +178,7 @@ Kirim balasan HANYA dalam format JSON ini:
         data = json.loads(clean_json)
 
         return {
-            "master_report": data.get("master_report", "Halo, ada yang bisa gue bantu?"),
+            "master_report": data.get("master_report", "Halo! Ada yang bisa gue bantu hari ini?"),
             "delegations": data.get("delegations", [])
         }
     except Exception as e:
@@ -189,13 +194,12 @@ async def process_agent_task_background(agent_id: str, agent_name: str, task_des
 
     long_term_memories = get_agent_long_term_memories(agent_id, limit=5)
 
-    background_prompt = f"""Proyek: "{macro_brief}"
-Instruksi dari Pak Pakar: "{task_description}"
+    background_prompt = f"""Brief Proyek: "{macro_brief}"
+Arahan CEO: "{task_description}"
 
 {long_term_memories}
 
-Tugasmu:
-Kerjakan tugas di atas secara detail sesuai keahlianmu, lalu kirimkan hasilnya di chat dengan gaya bahasamu sendiri."""
+Tugasmu: Kerjakan instruksi di atas sesuai peranmu, lalu sampaikan update pengerjaannya di chat kantor dengan gaya bahasamu sendiri."""
 
     try:
         supabase.table("messages").insert({
@@ -205,7 +209,7 @@ Kerjakan tugas di atas secara detail sesuai keahlianmu, lalu kirimkan hasilnya d
         }).execute()
 
         response = await call_llm_safe([
-            SystemMessage(content=f"{system_prompt}\nJawablah sebagai manusia nyata."),
+            SystemMessage(content=f"{system_prompt}\nJawablah secara alami sebagai pekerja nyata."),
             HumanMessage(content=background_prompt)
         ])
 
