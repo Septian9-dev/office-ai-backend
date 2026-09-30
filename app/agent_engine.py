@@ -9,14 +9,14 @@ from app.database import supabase, get_agent_from_db
 
 load_dotenv()
 
-# High Temperature (0.85) agar bahasa bervariasi dan tidak kaku
+# Konfigurasi LLM menggunakan model gemini-3.5-flash-lite dan temperature 0.85
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="gemini-3.5-flash-lite",
     temperature=0.85,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-# PROMPT KHUSUS: FEW-SHOT EXAMPLES + BANNED WORDS
+# PROMPT FEW-SHOT & PANDUAN KATA TERLARANG
 FEW_SHOT_HUMAN_PROMPT = """
 DILARANG KERAS MENGGUNAKAN KATA-KATA ROBOTIK BERIKUT:
 ❌ "Tentu,"
