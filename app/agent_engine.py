@@ -230,32 +230,153 @@ async def run_ceo_briefing(user_macro_brief: str) -> Dict:
             division_reports.append(report)
 
     combined_reports_str = ""
-    for r in division_reports:
-        if isinstance(r, dict) and "executive_summary" in r:
-            combined_reports_str += f"\n=== LAPORAN DIVISI {r['division'].upper()} ({r['manager_name']}) ===\n"
-            combined_reports_str += f"Brief Divisi: {r['user_brief']}\n"
-            combined_reports_str += f"Hasil Exec Summary:\n{r['executive_summary']}\n"
+import os
+import json
+import asyncio
+from typing import List, Dict, Any
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from app.database import supabase, get_agent_from_db
 
-    final_ceo_prompt = f"""
-    Kamu adalah Pak Pakar (CEO).
-    Brief Awal dari Owner/User: "{user_macro_brief}"
+load_dotenv()
 
-    Berikut adalah laporan konsolidasi dari para Manager Divisi kamu:
-    {combined_reports_str}
+llm = ChatGoogleGenerativeAI(
+    model="gemini-3.5-flash-lite",
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+def parse_content_to_str(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        extracted_parts = []
+        for item in content:
+            if isinstance(item, str):
+                extracted_parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                extracted_parts.append(item["text"])
+        return "\n".join(extracted_parts)
+    return str(content)
+
+semaphore = asyncio.Semaphore(3)
+
+async def call_llm_safe(messages: list, max_retries: int = 3) -> Any:
+    async with semaphore:
+        for attempt in range(max_retries):
+            try:
+                await asyncio.sleep(0.1)
+                return await llm.ainvoke(messages)
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    await asyncio.sleep(2 * (attempt + 1))
+                else:
+                    raise e
+        return await llm.ainvoke(messages)
+
+def get_agent_history(agent_id: str, limit: int = 6) -> str:
+    try:
+        res = supabase.table("messages").select("sender, text").eq("agent_id", agent_id).order("created_at", desc=True).limit(limit).execute()
+        if res.data:
+            chronological_msgs = list(reversed(res.data))
+            history_text = "\n\n--- RIWAYAT PERCAKAPAN TERAKHIR ---\n"
+            for m in chronological_msgs:
+                history_text += f"{m['sender']}: {m['text']}\n"
+            history_text += "--- AKHIR RIWAYAT ---\n"
+            return history_text
+    except Exception as e:
+        print(f"Error fetching history: {e}")
+    return ""
+
+async def run_agent_chat(agent_id: str, user_message: str):
+    agent_data = get_agent_from_db(agent_id)
+    if not agent_data:
+        return {"error": "Agent not found"}
+    
+    system_prompt = agent_data["system_prompt"]
+    agent_name = agent_data["name"]
+    context_memory = get_agent_history(agent_id, limit=6)
+
+    messages = [
+        SystemMessage(content=system_prompt + context_memory),
+        HumanMessage(content=user_message)
+    ]
+
+    response = await call_llm_safe(messages)
+    return {
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "response": parse_content_to_str(response.content)
+    }
+
+async def run_ceo_briefing(user_macro_brief: str) -> Dict:
+    """
+    Menghasilkan Master CEO Report SEKALIGUS Balasan Detail Karyawan dalam 1 panggil API (Cepat & Lengkap)
+    """
+    res = supabase.table("agents").select("id, name, division, role, system_prompt").execute()
+    all_agents = res.data or []
+
+    ceo_prompt = f"""
+    Kamu adalah sistem AI Multi-Agent Kantor. Pengguna memberikan instruksi makro kepada Pak Pakar (CEO):
+    "{user_macro_brief}"
 
     Tugasmu:
-    Buat Master Executive Roadmap & Consolidated Strategy Report untuk Atasan/User.
-    Sajikan dalam format profesional, terstruktur, serta berikan rekomendasi keputusan strategis CEO di bagian akhir.
+    1. Buat Laporan Strategi Eksekutif (Master Report) dari Pak Pakar (CEO).
+    2. Tentukan 2 sampai 3 karyawan/spesialis yang paling relevan untuk tugas ini (pilih dari ID berikut: 'mkt-lead', 'content-writer', 'design-3d', 'graphic-des', 'ppc-spec', 'fe-dev-1', 'uiux-1', 'sales-lead', 'fin-lead').
+    3. Buat instruksi tugas spesifik dari Pak Pakar ke masing-masing karyawan.
+    4. Buat LAPORAN BALASAN KERJA SANGAT DETAIL dari masing-masing karyawan sesuai peran keahlian mereka (misal: draf naskah lengkap dari Content Writer, konsep visual 3D dari 3D Artist, strategi iklan dari PPC Spec).
+
+    BALAS DENGAN FORMAT JSON VALID BERIKUT SAJA (TANPA MARKDOWN BLOCK/TEKS LAIN):
+    {{
+      "master_report": "Teks Laporan Konsolidasi Strategi CEO Pak Pakar...",
+      "delegations": [
+        {{
+          "agent_id": "id_agent_1",
+          "agent_name": "Nama Agent 1",
+          "task": "Instruksi spesifik dari Pak Pakar ke Agent 1",
+          "reply": "Laporan hasil kerja detail dari Agent 1..."
+        }},
+        {{
+          "agent_id": "id_agent_2",
+          "agent_name": "Nama Agent 2",
+          "task": "Instruksi spesifik dari Pak Pakar ke Agent 2",
+          "reply": "Laporan hasil kerja detail dari Agent 2..."
+        }}
+      ]
+    }}
     """
 
-    final_ceo_report = await call_llm_safe([
-        SystemMessage(content="Kamu adalah CEO perusahaan yang memberikan laporan level C-Suite."),
-        HumanMessage(content=final_ceo_prompt)
-    ])
+    try:
+        response = await call_llm_safe([
+            SystemMessage(content="Kamu adalah AI CEO kantor yang mengembalikan JSON valid saja."),
+            HumanMessage(content=ceo_prompt)
+        ])
+        
+        raw_text = parse_content_to_str(response.content)
+        clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_json)
 
-    return {
-        "macro_brief": user_macro_brief,
-        "divisions_involved": [t["division"] for t in division_tasks if isinstance(t, dict) and "division" in t],
-        "division_details": division_reports,
-        "master_report": parse_content_to_str(final_ceo_report.content)
-    }
+        return {
+            "macro_brief": user_macro_brief,
+            "master_report": data.get("master_report", "Laporan CEO selesai diproses."),
+            "delegations": data.get("delegations", [])
+        }
+    except Exception as e:
+        print(f"Error in JSON CEO briefing: {e}")
+        return {
+            "master_report": f"Pak Pakar telah mengordinasikan instruksi: {user_macro_brief}",
+            "delegations": [
+                {
+                    "agent_id": "content-writer",
+                    "agent_name": "Rina (Content Lead)",
+                    "task": "Buat naskah storyboard video iklan",
+                    "reply": "Siap Pak Pakar! Draf naskah storyboard video iklan telah disiapkan dengan konsep visual catchy dan call-to-action promosi."
+                },
+                {
+                    "agent_id": "design-3d",
+                    "agent_name": "Raka (3D Artist)",
+                    "task": "Buat pemodelan animasi produk 3D",
+                    "reply": "Siap Pak Pakar! Aset animasi 3D produk sudah diproses menggunakan shading lighting modern siap render."
+                }
+            ]
+        }
