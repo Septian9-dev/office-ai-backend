@@ -51,7 +51,6 @@ def get_messages(agent_id: str):
 
 @app.post("/chat/agent")
 async def chat_with_agent(req: ChatRequest):
-    save_message(req.agent_id, "You", req.message)
     msg_lower = req.message.lower()
 
     briefing_keywords = [
@@ -62,7 +61,13 @@ async def chat_with_agent(req: ChatRequest):
     ]
     is_briefing_kw = any(kw in msg_lower for kw in briefing_keywords)
 
+    # JIKA INSTRUKSI CEO ATAU MEMILIKI KATA KUNCI DELEGASI
     if req.agent_id == "ceo-main" or is_briefing_kw:
+        # Simpan pesan pengguna ke riwayat CEO dan agen yang sedang dipilih
+        save_message("ceo-main", "You", req.message)
+        if req.agent_id != "ceo-main":
+            save_message(req.agent_id, "You", req.message)
+
         result = await run_ceo_briefing(req.message)
         
         involved_ids = ["ceo-main"]
@@ -71,7 +76,7 @@ async def chat_with_agent(req: ChatRequest):
         else:
             reply_text = result.get("master_report", "Gagal memproses briefing CEO.")
             
-            # Duplikasi riwayat pesan ke agen spesialis yang ditugaskan
+            # Duplikasi riwayat instruksi & hasil kerja ke agen spesialis yang ditugaskan
             if isinstance(result, dict) and "division_details" in result:
                 for div in result["division_details"]:
                     if isinstance(div, dict) and "team_contributions" in div:
@@ -85,6 +90,9 @@ async def chat_with_agent(req: ChatRequest):
                                 save_message(target_id, contrib.get("agent_name", "Specialist"), res_text)
 
         save_message("ceo-main", "Pak Pakar (CEO)", reply_text)
+        if req.agent_id != "ceo-main":
+            save_message(req.agent_id, "Pak Pakar (CEO)", reply_text)
+
         return {
             "agent_id": "ceo-main",
             "agent_name": "Pak Pakar (CEO)",
@@ -93,6 +101,7 @@ async def chat_with_agent(req: ChatRequest):
         }
 
     # CHAT ORDINARY (1-ON-1)
+    save_message(req.agent_id, "You", req.message)
     result = await run_agent_chat(req.agent_id, req.message)
     reply_text = result.get("response", "Tidak ada respon.")
     save_message(req.agent_id, result.get("agent_name", "Agent"), reply_text)
