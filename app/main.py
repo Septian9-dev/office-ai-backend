@@ -54,7 +54,6 @@ async def chat_with_agent(req: ChatRequest):
     save_message(req.agent_id, "You", req.message)
     msg_lower = req.message.lower()
 
-    # Kata kunci penanda instruksi briefing / pembaruan proyek / delegasi tugas
     briefing_keywords = [
         "briefing", "semua divisi", "lintas divisi", "kumpulkan manajer", 
         "kumpulkan manager", "rapat divisi", "koordinasi divisi", 
@@ -63,20 +62,34 @@ async def chat_with_agent(req: ChatRequest):
     ]
     is_briefing_kw = any(kw in msg_lower for kw in briefing_keywords)
 
-    # JIKA DIKIRIM KE CEO ATAU MEMILIKI KATA KUNCI DELEGASI
     if req.agent_id == "ceo-main" or is_briefing_kw:
         result = await run_ceo_briefing(req.message)
         
+        involved_ids = ["ceo-main"]
         if isinstance(result, dict) and "error" in result:
             reply_text = f"Maaf, terjadi kesalahan saat menyusun briefing: {result['error']}"
         else:
             reply_text = result.get("master_report", "Gagal memproses briefing CEO.")
-        
+            
+            # Duplikasi riwayat pesan ke agen spesialis yang ditugaskan
+            if isinstance(result, dict) and "division_details" in result:
+                for div in result["division_details"]:
+                    if isinstance(div, dict) and "team_contributions" in div:
+                        for contrib in div["team_contributions"]:
+                            target_id = contrib.get("agent_id")
+                            task_text = contrib.get("task")
+                            res_text = contrib.get("result")
+                            if target_id:
+                                involved_ids.append(target_id)
+                                save_message(target_id, "You", f"📌 [Instruksi CEO]: {task_text}")
+                                save_message(target_id, contrib.get("agent_name", "Specialist"), res_text)
+
         save_message("ceo-main", "Pak Pakar (CEO)", reply_text)
         return {
             "agent_id": "ceo-main",
             "agent_name": "Pak Pakar (CEO)",
-            "response": reply_text
+            "response": reply_text,
+            "involved_ids": list(set(involved_ids))
         }
 
     # CHAT ORDINARY (1-ON-1)
