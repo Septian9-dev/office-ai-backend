@@ -1,3 +1,7 @@
-from app.main import app
+import sys
+import os
 
-# Entrypoint untuk Vercel Serverless Function
+# Tambahkan root directory ke sys.path Vercel
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from main import app
